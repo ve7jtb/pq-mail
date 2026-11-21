@@ -55,6 +55,26 @@ encrypted fixtures contained no inline signature; detached signatures were
 verified separately. See the [hardware results and reusable five-test
 harness](docs/V4-HARDWARE-REGRESSION.md).
 
+### Successful optional v5 interoperability — 2026-11-21
+
+The development compatibility codec and GnuPG connector passed **v5 Ed25519
+signing and ML-KEM-768/X25519 hybrid decryption in both directions** using an
+existing Level 3 YubiKey PIV identity. Stock GnuPG independently verified the
+PQ Mail signature, and PQ Mail verified the GnuPG signature. GnuPG recovered the
+PQ Mail SEIPD v1 fixture with a valid MDC; PQ Mail recovered stock GnuPG's
+LibrePGP tag-20 OCB fixture with authenticated, byte-identical plaintext.
+All **24 key/public-key/PIN/touch-policy snapshots** and selected backend hashes
+matched before and after. The run changed no hardware keys or card
+certificates and sent no email.
+
+This optional profile uses **classical Ed25519 signatures** and LibrePGP
+algorithm-8 hybrid encryption; its encoding and combiner are distinct from
+RFC 9980 algorithm 35. **v6 remains the default.** The result covers the staged
+development codec and hardware drivers, with detached signatures checked
+separately. It does not establish v5 inline signatures, a live PGP/MIME exchange,
+or a selectable persistent v5 desktop identity. See the [v5 results, limits and
+reusable test harness](docs/V5-HARDWARE-REGRESSION.md).
+
 ## Experimental Google Chat
 
 The desktop app can connect to Google Chat, browse conversations, and send or open signed and optionally encrypted OpenPGP bundles. Enable **Experimental Google Chat** in Settings → Mail accounts, select the separate Desktop OAuth client bundled with your build, then use **Google Chat → Sign in or reconnect**. The feature remains off by default. A dedicated development Google Cloud project keeps Chat consent separate from Gmail; it requests `chat.spaces.readonly`, `chat.messages.readonly` and `chat.messages.create`, plus basic account email identification.

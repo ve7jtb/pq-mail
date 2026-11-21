@@ -5,7 +5,7 @@ import java.util.*;
 import org.bouncycastle.openpgp.*;
 import org.bouncycastle.openpgp.operator.jcajce.*;
 
-/** Validated v4 and RFC 9980 v6 public key rings. Never supplies a private key. */
+/** Validated v4, optional LibrePGP v5 and RFC 9980 v6 public key rings. Never supplies a private key. */
 final class LegacyOpenPgp {
     final int version;
     final PGPPublicKey primary, recipient;
@@ -22,7 +22,7 @@ final class LegacyOpenPgp {
         try(in;var out=new ByteArrayOutputStream()){byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){require(out.size()+n<=OpenPgp.LIMIT,"OpenPGP decompressed data exceeds limit");out.write(buf,0,n);}return out.toByteArray();}}
     static long seconds(Date d){return d.getTime()/1000;}
     static void policy(PGPSignature s)throws Exception{
-        require((s.getVersion()==4||s.getVersion()==6),"Expected v4/v6 signature");
+        require((s.getVersion()==4||s.getVersion()==5||s.getVersion()==6),"Expected v4/v5/v6 signature");
         require(List.of(8,9,10,11,12,14).contains(s.getHashAlgorithm()),"Legacy signatures require SHA-224 or stronger SHA-2");
         var h=s.getHashedSubPackets();require(h!=null&&h.hasSubpacket(2),"Signature has no authenticated creation time");
         for(int t:h.getCriticalTags())require(List.of(2,3,9,11,16,21,22,23,25,27,30,32,33,34,39).contains(t),"Unsupported critical signature subpacket: "+t);
@@ -33,8 +33,10 @@ final class LegacyOpenPgp {
         policy(s);require(s.getVersion()==k.getVersion(),"Certificate signature version mismatch");long created=seconds(k.getCreationTime()),expiry=s.getHashedSubPackets().getKeyExpirationTime();
         return seconds(s.getCreationTime())>=created&&created<=OpenPgp.now()+300&&(expiry==0||created+expiry>=OpenPgp.now());
     }
-    static int rank(PGPPublicKey k){return k.getAlgorithm()==36?2:k.getAlgorithm()==35?1:0;}
-    static boolean supported(PGPPublicKey k){return k.getVersion()==6?List.of(25,26,27,28,30,31,35,36).contains(k.getAlgorithm()):k.getVersion()==4&&switch(k.getAlgorithm()){
+    // Algorithm 8 has this hybrid meaning only inside the explicitly bounded
+    // v5 profile. Do not reinterpret other packet versions using that number.
+    static int rank(PGPPublicKey k){return k.getAlgorithm()==36?2:k.getAlgorithm()==35||k.getVersion()==5&&k.getAlgorithm()==8?1:0;}
+    static boolean supported(PGPPublicKey k){return k.getVersion()==5?(k.getAlgorithm()==22&&k.isMasterKey()||k.getAlgorithm()==8&&!k.isMasterKey()):k.getVersion()==6?List.of(25,26,27,28,30,31,35,36).contains(k.getAlgorithm()):k.getVersion()==4&&switch(k.getAlgorithm()){
         case 1,2,3 -> k.getBitStrength()>=2048;
         case 30 -> k.getVersion()==6;
         case 35 -> !k.isMasterKey();
@@ -49,14 +51,14 @@ final class LegacyOpenPgp {
         var out=new ArrayList<PGPSignature>();int count=0;
         while(it!=null&&it.hasNext()){require(++count<=512,"Too many certificate signatures");var s=it.next();
             // A wrong issuer ID may be omitted, so only cryptographic verification establishes authorship.
-            try{s.init(verifier(),issuer);if(check.run(s))out.add(s);}catch(PGPException|IllegalArgumentException e){/* invalid/third-party signature */}
+            try{s.init(issuer.getVersion()==5?LibreOpenPgp.verifier():verifier(),issuer);if(check.run(s))out.add(s);}catch(PGPException|IllegalArgumentException e){/* invalid/third-party signature */}
         }return out;
     }
     static PGPSignature latest(List<PGPSignature> list){return list.stream().max(Comparator.comparing(PGPSignature::getCreationTime)).orElse(null);}
     LegacyOpenPgp(byte[] encoded)throws Exception{this(encoded,4);}
     LegacyOpenPgp(byte[] encoded,int version)throws Exception{
         this.version=version;
-        require(encoded.length<=128*1024,"Public certificate exceeds 128 KiB");var f=objects(encoded);Object o=f.nextObject();
+        require(encoded.length<=128*1024,"Public certificate exceeds 128 KiB");if(version==5)LibreOpenPgp.validateCertificateEncoding(encoded);var f=objects(encoded);Object o=f.nextObject();
         require(o instanceof PGPPublicKeyRing&&f.nextObject()==null,"Expected exactly one public certificate");var ring=(PGPPublicKeyRing)o;primary=ring.getPublicKey();
         require(primary.getVersion()==version&&supported(primary)&&primary.isMasterKey(),"Unsupported primary key");
         require(verified(primary.getSignaturesOfType(PGPSignature.KEY_REVOCATION),primary,s->s.verifyCertification(primary)).isEmpty(),"Revoked primary key");
@@ -70,7 +72,7 @@ final class LegacyOpenPgp {
         while(ids.hasNext()){require(++count<=64,"Too many certificate user IDs");String uid=ids.next();
             var self=verified(primary.getSignaturesForID(uid),primary,s->(s.getSignatureType()>=16&&s.getSignatureType()<=19||s.getSignatureType()==48)&&s.verifyCertification(uid,primary));
             if(self.stream().anyMatch(s->s.getSignatureType()==48))continue;
-            var cert=latest(self);if(cert==null)continue;require(!cert.getHashedSubPackets().hasSubpacket(12),"Designated revocation keys are not supported");if(version==4)policies.add(cert);
+            var cert=latest(self);if(cert==null)continue;require(!cert.getHashedSubPackets().hasSubpacket(12),"Designated revocation keys are not supported");if(version==4||version==5)policies.add(cert);
             try{if(!live(primary,cert))continue;}catch(Exception e){continue;}
             int at=uid.lastIndexOf('<');String email=at>=0&&uid.endsWith(">")?uid.substring(at+1,uid.length()-1):uid;
             try{OpenPgp.validateEmail(email);addresses.add(email);}catch(Exception e){/* non-mail user ID */}
@@ -87,7 +89,7 @@ final class LegacyOpenPgp {
             var bind=latest(verified(k.getSignaturesOfType(PGPSignature.SUBKEY_BINDING),primary,s->s.verifyCertification(primary,k)));if(bind==null)continue;
             try{if(!live(k,bind))continue;}catch(Exception e){continue;}
             boundKeys.put(k.getKeyID(),k);bindings.put(k.getKeyID(),bind);int flags=bind.getHashedSubPackets().getKeyFlags();
-            if((flags&12)!=0&&k.isEncryptionKey()&&(selected==null||rank(k)>rank(selected)||rank(k)==rank(selected)&&k.getCreationTime().after(selected.getCreationTime())))selected=k;
+            if((flags&12)!=0&&(k.isEncryptionKey()||version==5&&k.getAlgorithm()==8)&&(selected==null||rank(k)>rank(selected)||rank(k)==rank(selected)&&k.getCreationTime().after(selected.getCreationTime())))selected=k;
             // Signing subkeys additionally prove possession with an embedded
             // primary-key-binding signature (back signature). An encryption
             // binding alone is insufficient to authorize document signatures.
@@ -97,6 +99,9 @@ final class LegacyOpenPgp {
                 if(cross){require(!signers.containsKey(k.getKeyID()),"Ambiguous signing key ID");signers.put(k.getKeyID(),k);bindings.put(k.getKeyID(),bind);}
             }
         }recipient=selected;
+        // Resolve the exact v5 component shapes now, before accepting this
+        // certificate as an encryption candidate or dispatching a private call.
+        if(version==5&&recipient!=null)LibreOpenPgp.encryptionKeys(this);
     }
     String signingAlgorithms(){
         return signers.isEmpty()?"No usable signing key":signers.values().stream().map(k->{
@@ -113,6 +118,7 @@ final class LegacyOpenPgp {
         if(recipient==null)return "No usable encryption subkey";
         if(recipient.getAlgorithm()==36)return "ML-KEM-1024 + X448";
         if(recipient.getAlgorithm()==35)return "ML-KEM-768 + X25519";
+        if(version==5&&recipient.getAlgorithm()==8)return "ML-KEM-768 + X25519 (LibrePGP v5)";
         if(recipient.getAlgorithm()==18&&recipient.getPublicKeyPacket().getKey() instanceof org.bouncycastle.bcpg.ECPublicBCPGKey ec){
             return switch(ec.getCurveOID().getId()){
                 case "1.3.6.1.4.1.3029.1.5.1","1.3.101.110" -> "X25519";
@@ -126,6 +132,7 @@ final class LegacyOpenPgp {
     }
     boolean matches(String email){return emails.stream().anyMatch(s->s.equalsIgnoreCase(email));}
     byte[] encrypt(byte[] signed)throws Exception{
+        if(version==5)return LibreOpenPgp.encrypt(signed,this);
         // Revalidate at use, so a certificate cannot remain usable past expiration in a long-running app.
         require(live(primary,primaryPolicy),"Expired primary key");require(recipient!=null&&live(recipient,bindings.get(recipient.getKeyID())),"Certificate has no current encryption subkey");
         require(cipher!=0,"Recipient does not advertise supported AES encryption");
@@ -144,6 +151,7 @@ final class LegacyOpenPgp {
         var f=objects(signature);Object o=f.nextObject();require(o instanceof PGPSignatureList&&((PGPSignatureList)o).size()==1&&f.nextObject()==null,"Expected one detached signature");verify(((PGPSignatureList)o).get(0),data);
     }
     void verify(PGPSignature s,byte[] data)throws Exception{
+        if(version==5){LibreOpenPgp.verifySignature(s,data,this);return;}
         policy(s);require(s.getVersion()==version,"Signature version does not match certificate");require(s.getSignatureType()==0||s.getSignatureType()==1,"Expected document signature");
         require(live(primary,primaryPolicy),"Expired primary key");var k=signers.get(s.getKeyID());require(k!=null,"Signature does not use a certified signing key");
         if(!k.isMasterKey())require(live(k,bindings.get(k.getKeyID())),"Expired signing subkey");
@@ -155,6 +163,7 @@ final class LegacyOpenPgp {
     // literal bytes are returned only after document-signature verification;
     // parsing a literal packet must never itself trigger a "verified" display.
     byte[] openSigned(byte[] data)throws Exception{
+        require(version!=5,"V5 inline signatures are not supported; use detached PGP/MIME signatures");
         var f=objects(data);Object first=f.nextObject();int depth=0;
         while(first instanceof PGPCompressedData c){require(++depth<=3,"Unsupported compressed packet nesting");data=bounded(c.getDataStream());require(f.nextObject()==null,"Trailing compressed packet");f=objects(data);first=f.nextObject();}
         require(first instanceof PGPOnePassSignatureList&&((PGPOnePassSignatureList)first).size()==1,"Expected one document signer");var one=((PGPOnePassSignatureList)first).get(0);
