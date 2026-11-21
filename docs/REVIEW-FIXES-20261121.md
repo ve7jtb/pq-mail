@@ -52,18 +52,36 @@ against the mirrored software bridge. Patch preflight also passed on clean
 GnuPG 2.5.23 and 2.5.24 trees. Each connector README documents its commands and
 separate core/adapter dependencies.
 
-No physical key was accessed during these fixes or regressions. Tests use
+No physical key was accessed during the software fixes or regressions above. Those tests use
 disposable software keys, fake backends/storage and mocked Google transports.
 No keys, certificates, PIN/touch policies or account data were modified. The Mac
 update was installed and reopened after deep/strict code-signature verification;
 the provisioned Keychain helper was preserved byte-for-byte.
+
+## Hardware follow-up — 2026-11-21
+
+After installing the reviewed Mac build, a separate authorized Level 3 hardware
+run passed all five operations: v4 Ed25519/SHA-512 and Ed25519/SHA-256 signing,
+GnuPG decryption of PQ Mail and fixed-GnuPG ML-KEM-768/X25519 ciphertexts, and
+installed PQ Mail decryption of the fixed-GnuPG v6-PKESK/v4-recipient ciphertext.
+Stock GnuPG and installed PQ Mail independently verified both detached signatures.
+The three decrypted plaintexts matched the synthetic fixture exactly and passed
+integrity checks. These encrypted fixtures do not contain an inline signature.
+
+All 24 ordinary PIV slots matched before and after: ten occupied and fourteen
+empty, comparing public-key hashes, algorithms, origins, PIN policies and touch
+policies. The installed jar and PKCS#11 backend hashes also matched the run's
+preflight. No keys, certificates or policies were changed, and no mail was sent.
+The [hardware report](V4-HARDWARE-REGRESSION.md) describes the reusable driver,
+local-only evidence and limits of this result.
 
 ## Limits
 
 Connector process supervision is implemented and tested on macOS/POSIX;
 unsupported non-POSIX execution fails before launching a private operation.
 This work did not create new Windows/Linux installers, install Android/iOS builds,
-upgrade crypto/runtime dependencies or rerun hardware/mail interoperability.
+upgrade crypto/runtime dependencies or rerun live-mail interoperability. The
+hardware follow-up is limited to the five Level 3 operations described above.
 GnuPG protocol/core extensions and its PIV adapter remain separate workstreams;
 the adapter alone does not add unsupported OpenPGP algorithms to stock GnuPG.
 Public source and synthetic test fixtures are published; machine-specific paths,

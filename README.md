@@ -44,6 +44,17 @@ operations and changed no keys, certificates or touch policies. See the
 [seven-fix report and test commands](docs/REVIEW-FIXES-20261121.md) for scope,
 platform limitations and reproducible checks.
 
+The subsequent Level 3 v4 hardware run passed **all five operations**: two
+Ed25519 compatibility signatures (SHA-512 and SHA-256), two GnuPG hybrid
+decryptions, and installed PQ Mail decryption of the fixed GnuPG sender's
+v6-PKESK/v4-recipient message. Both signatures were verified independently by
+stock GnuPG and installed PQ Mail. All **24 PIV slot snapshots** matched before
+and after: ten occupied slots, fourteen empty slots, with identical public keys,
+algorithms, origins, PIN policies and touch policies. No email was sent. The
+encrypted fixtures contained no inline signature; detached signatures were
+verified separately. See the [hardware results and reusable five-test
+harness](docs/V4-HARDWARE-REGRESSION.md).
+
 ## Experimental Google Chat
 
 The desktop app can connect to Google Chat, browse conversations, and send or open signed and optionally encrypted OpenPGP bundles. Enable **Experimental Google Chat** in Settings → Mail accounts, select the separate Desktop OAuth client bundled with your build, then use **Google Chat → Sign in or reconnect**. The feature remains off by default. A dedicated development Google Cloud project keeps Chat consent separate from Gmail; it requests `chat.spaces.readonly`, `chat.messages.readonly` and `chat.messages.create`, plus basic account email identification.
