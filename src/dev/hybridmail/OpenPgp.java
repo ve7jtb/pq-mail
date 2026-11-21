@@ -286,6 +286,9 @@ public final class OpenPgp {
         if(Files.exists(p)){var previous=loadOwn(root,id);Path backup=p.resolveSibling(p.getFileName()+"."+previous.fingerprint()+".backup");if(!Files.exists(backup))Files.copy(p,backup);}
         Path tmp=Files.createTempFile(p.getParent(),"pgp-",".tmp");try{Files.write(tmp,own.export());Files.move(tmp,p,StandardCopyOption.REPLACE_EXISTING);}finally{Files.deleteIfExists(tmp);}return own;
     }
+    // RFC 9980 combines both shared secrets with the ephemeral and recipient
+    // public keys plus an algorithm-specific domain separator. Component order
+    // is protocol data; it is independent of the slots chosen by the manifest.
     static byte[] combine(byte[] pq,byte[] ec,byte[] point,byte[] recipient)throws Exception{boolean strong=point.length==56,x=point.length==32||strong;check(pq.length==32&&ec.length==(x?point.length:48)&&point.length==(x?(strong?56:32):97)&&recipient.length==point.length,"Invalid KEM components");check(!Arrays.equals(ec,new byte[ec.length]),"Invalid zero ECDH shared secret");return hash("SHA3-256",cat(pq,ec,point,recipient,b(x?(strong?36:35):37),bytes("OpenPGPCompositeKDFv1"),b(21)));}
     record Encapsulation(byte[] ciphertext,byte[] kek){}
     static Encapsulation encapsulate(PublicIdentity recipient)throws Exception{
@@ -478,7 +481,14 @@ public final class OpenPgp {
         public String display(){return securityDisplay()+"\n\n"+text;}
     }
     static byte[] classicalV4Body(PublicIdentity own)throws Exception{return cat(b(4),slice(own.classicalBody(false),1,5),b(18),X25519_OID,mpi(cat(b(0x40),raw(own.classicalKey(false)))),b(3,1,8,7));}
-    static boolean classicalEnvelope(byte[] encoded)throws Exception{var p=packets(encoded);if(p.isEmpty()||p.get(0).tag!=1)return false;byte[] b=p.get(0).body;return b.length>10&&b[0]==3&&b[9]==18||b.length>36&&b[0]==6&&b[35]==25;}
+    static boolean classicalEnvelope(byte[] encoded)throws Exception{
+        var p=packets(encoded);if(p.isEmpty()||p.get(0).tag!=1)return false;byte[] b=p.get(0).body;
+        // The algorithm is at offset 35 only for an addressed v6 recipient.
+        // A v6 PKESK naming a v4 key has its algorithm at offset 23; reading
+        // offset 35 there would mistake an arbitrary ciphertext byte for X25519.
+        return b.length>10&&b[0]==3&&b[9]==18
+            ||b.length>36&&b[0]==6&&b[1]==33&&b[2]==6&&b[35]==25;
+    }
     static byte[] openClassicalEncrypted(byte[] encoded,PublicIdentity own,ExternalKem.Backend backend)throws Exception{
         check(backend!=null&&own.classicalBody(false)!=null,"Select the migrated X25519 compatibility identity");var packets=packets(encoded);check(packets.stream().map(Packet::tag).toList().equals(List.of(1,18)),"Expected one recipient and protected encrypted payload");Reader r=new Reader(packets.get(0).body);int version=r.one();byte[] point,wrapped;boolean legacy=version==3;
         if(legacy){byte[] fp=fingerprint(classicalV4Body(own));check(Arrays.equals(r.take(8),slice(fp,12,20))&&r.one()==18,"Wrong classical recipient");byte[] mpi=mpi(r,263);check(mpi.length==33&&mpi[0]==0x40,"Invalid X25519 point");point=slice(mpi,1,33);}else{check(version==6&&r.one()==33&&r.one()==6&&Arrays.equals(r.take(32),fingerprint(own.classicalBody(false)))&&r.one()==25,"Wrong v6 classical recipient");point=r.take(32);}
@@ -492,14 +502,62 @@ public final class OpenPgp {
             var list=(org.bouncycastle.openpgp.PGPEncryptedDataList)LegacyOpenPgp.objects(encoded).nextObject();var data=list.extractSessionKeyEncryptedData();check(data.isIntegrityProtected(),"Unprotected data rejected");byte[] plain=LegacyOpenPgp.bounded(data.getDataStream(new org.bouncycastle.openpgp.operator.jcajce.JceSessionKeyDataDecryptorFactoryBuilder().setProvider("BC").build(new org.bouncycastle.openpgp.PGPSessionKey(cipher,session))));check(data.verify(),"Message integrity failed");return plain;
         }finally{wipe(secret);wipe(kek);wipe(session);op.clearSecrets();}
     }
+    /** Packet version and recipient-key version are independent. A v6 PKESK
+     * may name a v4 certificate by its complete 20-byte fingerprint. Anonymous
+     * recipients remain unsupported: the user-selected credential must match
+     * before any PIN prompt or private component operation. */
+    record V4Recipient(int version,byte[] address,int algorithm,Reader data) {
+        void requireKey(byte[] key,int expectedAlgorithm)throws Exception {
+            check(key.length>5&&key[0]==4&&algorithm==expectedAlgorithm,"Unsupported v4 recipient algorithm");
+            byte[] fp=fingerprint(key);
+            // v3 transmits only a key ID; v6 transmits the complete fingerprint.
+            // Never truncate the v6 value to a matching low 64-bit key ID.
+            check(Arrays.equals(address,version==3?slice(fp,12,20):fp),"v4 recipient does not match selected identity");
+        }
+    }
+    static V4Recipient v4Recipient(byte[] packet)throws Exception {
+        Reader r=new Reader(packet);int version=r.one();byte[] address;
+        if(version==3)address=r.take(8);
+        else {
+            // The length includes the key-version byte: 1 + SHA-1's 20 bytes.
+            // In particular, reject zero/anonymous recipients, padded 32-byte
+            // v4 fingerprints, and truncated bodies rather than guessing a key.
+            check(version==6&&r.one()==21&&r.one()==4,"Expected addressed v4 recipient in v6 PKESK");
+            address=r.take(20);
+        }
+        return new V4Recipient(version,address,r.one(),r);
+    }
+    static boolean v4Envelope(List<Packet> packets){
+        if(packets.isEmpty()||packets.get(0).tag!=1)return false;
+        byte[] body=packets.get(0).body;
+        // This is only a dispatcher. v4Recipient performs complete length and
+        // address validation, so a malformed header never reaches the backend.
+        return body.length>0&&(body[0]==3||body.length>=3&&body[0]==6&&body[2]==4);
+    }
+    record HybridSession(byte[] ciphertext,byte[] wrapped,int cipher){}
+    static HybridSession hybridSession(V4Recipient recipient)throws Exception {
+        Reader r=recipient.data;byte[] ct=r.take(1120);int size=r.one();
+        // Algorithm 35's v6 form omits the cipher octet and fixes AES-256.
+        // Its v3 form includes that octet in the advertised wrapped-key size.
+        int cipher=recipient.version==3?r.one():9;
+        check(List.of(7,8,9).contains(cipher)&&size==r.left()+(recipient.version==3?1:0),"Invalid hybrid session key");
+        int keyBytes=cipher==7?16:cipher==8?24:32;
+        check(r.left()==keyBytes+8,"Invalid wrapped AES key length");
+        return new HybridSession(ct,r.take(r.left()),cipher);
+    }
     static byte[] openCompatibilityEncrypted(byte[] encoded,PublicIdentity own,Identity id,ExternalKem.Backend backend)throws Exception {
         check(rfc9980(own),"v4 hybrid decryption requires the matching RFC 9980 identity");
         var packets=packets(encoded);check(packets.stream().map(Packet::tag).toList().equals(List.of(1,18)),"Expected one recipient and integrity-protected encrypted data");
-        byte[] subkey=cat(b(4),slice(own.subkey,1,5),b(35),raw(own.encryption.ec),raw(own.encryption.pq)),fp=fingerprint(subkey);
-        Reader r=new Reader(packets.get(0).body);check(r.one()==3&&Arrays.equals(r.take(8),slice(fp,12,20))&&r.one()==35,"v4 hybrid recipient does not match selected identity");
-        byte[] ct=r.take(1120);int len=r.one(),cipher=r.one();check(len==r.left()+1&&List.of(7,8,9).contains(cipher),"Invalid v3 hybrid session key");byte[] wrapped=r.take(r.left()),kek=recover(ct,id,backend,own),session=null;
+        byte[] subkey=cat(b(4),slice(own.subkey,1,5),b(35),raw(own.encryption.ec),raw(own.encryption.pq));
+        V4Recipient recipient=v4Recipient(packets.get(0).body);recipient.requireKey(subkey,35);
+        // Finish the public framing checks before recover can create a backend
+        // operation or prompt for a PIN. The encrypted payload is authenticated
+        // only after recovery; syntactically valid ciphertext is not yet trusted.
+        HybridSession request=hybridSession(recipient);
+        byte[] kek=recover(request.ciphertext,id,backend,own),session=null;
         try {
-            session=wrap(false,kek,wrapped);check(session.length==(cipher==7?16:cipher==8?24:32),"Invalid AES session key length");
+            session=wrap(false,kek,request.wrapped);int cipher=request.cipher;
+            check(session.length==(cipher==7?16:cipher==8?24:32),"Invalid AES session key length");
             var factory=LegacyOpenPgp.objects(encoded);Object object=factory.nextObject();check(object instanceof org.bouncycastle.openpgp.PGPEncryptedDataList,"Expected encrypted data");
             var data=((org.bouncycastle.openpgp.PGPEncryptedDataList)object).extractSessionKeyEncryptedData();check(data.isIntegrityProtected(),"Unprotected encrypted data rejected");
             byte[] plain=LegacyOpenPgp.bounded(data.getDataStream(new org.bouncycastle.openpgp.operator.jcajce.JceSessionKeyDataDecryptorFactoryBuilder().setProvider("BC").build(new org.bouncycastle.openpgp.PGPSessionKey(cipher,session))));
@@ -511,9 +569,12 @@ public final class OpenPgp {
         while(first instanceof org.bouncycastle.openpgp.PGPCompressedData compressed){check(++depth<=3,"Compression nesting");factory=LegacyOpenPgp.objects(LegacyOpenPgp.bounded(compressed.getDataStream()));first=factory.nextObject();}
         if(first instanceof org.bouncycastle.openpgp.PGPOnePassSignatureList list){int algorithm=list.get(0).getKeyAlgorithm();pq[0]=algorithm==30||algorithm==31||algorithm==41;}return plain;
     }
+    // Authentication precedes MIME interpretation and HTML presentation. The
+    // result reports cryptographic validity separately from contact trust and
+    // the unprotected outer From header; no trust is granted during parsing.
     public static Opened open(byte[] message,PublicIdentity signer,PublicIdentity own,Identity id,ExternalKem.Backend backend)throws Exception {
         check(signer!=null,"Import the sender's OpenPGP public key");Parts p=parts(message);byte[] plain;boolean[] quantum={signer.legacy==null&&signer.signing.pq!=null};
-        if(p.encrypted){check(own!=null&&id!=null,"Select the decryption identity");match(own,id);byte[] encoded=unarmor(decoded(mime(p.second)),"MESSAGE");var payload=id.softwareOpenPgp()!=null?List.<Packet>of():packets(encoded);if(id.softwareOpenPgp()!=null)plain=openSigned(id.softwareOpenPgp().decrypt(encoded),signer,quantum);else if(classical(id)&&own.compatibility!=null&&!payload.isEmpty()&&payload.get(0).tag==1&&payload.get(0).body[0]==3)plain=openSigned(Level5Compatibility.decrypt(encoded,own,backend),signer,quantum);else if(classicalEnvelope(encoded))plain=openSigned(openClassicalEncrypted(encoded,own,backend),signer,quantum);else if(!payload.isEmpty()&&payload.get(0).tag==1&&payload.get(0).body[0]==3)plain=openSigned(openCompatibilityEncrypted(encoded,own,id,backend),signer,quantum);else{Envelope env=envelope(encoded,own);byte[] kek=recover(env.ct,id,backend,own);try{plain=openSigned(env.open(kek),signer,quantum);}finally{wipe(kek);}}}
+        if(p.encrypted){check(own!=null&&id!=null,"Select the decryption identity");match(own,id);byte[] encoded=unarmor(decoded(mime(p.second)),"MESSAGE");var payload=id.softwareOpenPgp()!=null?List.<Packet>of():packets(encoded);if(id.softwareOpenPgp()!=null)plain=openSigned(id.softwareOpenPgp().decrypt(encoded),signer,quantum);else if(classical(id)&&own.compatibility!=null&&v4Envelope(payload))plain=openSigned(Level5Compatibility.decrypt(encoded,own,backend),signer,quantum);else if(classicalEnvelope(encoded))plain=openSigned(openClassicalEncrypted(encoded,own,backend),signer,quantum);else if(v4Envelope(payload))plain=openSigned(openCompatibilityEncrypted(encoded,own,id,backend),signer,quantum);else{Envelope env=envelope(encoded,own);byte[] kek=recover(env.ct,id,backend,own);try{plain=openSigned(env.open(kek),signer,quantum);}finally{wipe(kek);}}}
         else if(signer.v6!=null){byte[] signature=unarmor(decoded(mime(p.second)),"SIGNATURE");new LegacyOpenPgp(signer.encoded,6).verify(signature,p.first);int alg=((org.bouncycastle.openpgp.PGPSignatureList)LegacyOpenPgp.objects(signature).nextObject()).get(0).getKeyAlgorithm();quantum[0]=alg==30||alg==31;plain=p.first;}
         else if(signer.legacy!=null){new LegacyOpenPgp(signer.encoded).verify(unarmor(decoded(mime(p.second)),"SIGNATURE"),p.first);plain=p.first;}
         else{List<Packet> sig=packets(unarmor(decoded(mime(p.second)),"SIGNATURE"));check(sig.size()==1&&sig.get(0).tag==2,"Expected one detached signature");verify(sig.get(0).body,p.first,0,signer.primary);plain=p.first;}

@@ -66,7 +66,7 @@ def single_process_recover(helper,algorithm,public,data,provider,module,serial,s
         incoming=folder/'public-input.der';incoming.write_bytes(data)
         result=run([str(helper),algorithm,'pkcs11:serial='+serial+';id='+object_id(slot)+';type=',str(expected),str(incoming)],
                    input=bytes(pin)+b'\n',stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                   env=_common.child_environment(config,object_id(slot)),timeout=100,start_new_session=True)
+                   env=_common.child_environment(config,object_id(slot)),timeout=100,**_common.native_process_options())
         if result.returncode:raise AdapterError(single_process_failure(result,algorithm))
         if len(result.stdout)!=(48 if algorithm=='ECDH-P384' else 32):raise AdapterError('Invalid token shared secret length')
         return result.stdout

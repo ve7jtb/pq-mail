@@ -13,6 +13,37 @@ The [Independent Submission draft](docs/internet-drafts/draft-bradley-pqmail-cer
 
 The desktop/Sequoia development build also implements a [Level 3 software-PQ companion](docs/LEVEL3-POLYFILL.md) for classical-only cards: hardware Ed25519 certification/signing in 82/9c and X25519 decryption in 9d require PIN and touch; dedicated P-384 wrapping in 83 requires PIN without touch. The encrypted, empty-password .p12 holds separate ML-DSA-65 certification/signing seeds and an ML-KEM-768 seed. Normal operations need one hardware touch. Desktop creation/recovery/restore and PGP/MIME tests pass. Physical tests on YubiKey 5.8 **40814807** on November 21, 2026 passed hybrid signing/decryption in both implementations, verification in both directions and byte-identical on-key restore. The companion occupies **34,630 bytes**, and all keys and PIN/touch policies were unchanged during the successful test run. This v6 OpenPGP-only profile provides classical protection at rest and exposes software PQ keys in host memory during use. It does not create S/MIME/v4 identities or change the existing Level 3 hardware profile.
 
+## Review fixes and regression results — 2026-11-21
+
+A coordinated review corrected seven issues across PQ Mail, the standalone
+[gws–Sequoia frontend](https://github.com/ve7jtb/gws-sequoia-chat), the
+[Sequoia PIV connector](https://github.com/ve7jtb/sequoia/tree/development/yubikey6-piv/piv-adapter)
+and the [GnuPG connector](https://github.com/ve7jtb/gnupg/tree/development/yubikey6-piv/pqmail).
+
+- PQ Mail now accepts a v6 PKESK addressed to a v4 hybrid recipient, checking the
+  complete fingerprint and packet framing before private operations. Level 3 and
+  Level 5 regressions preserve existing v3 and native-v6 behavior.
+- The standalone frontend offers only current, policy-validated self-certified
+  email addresses for trust and rechecks cached contact bindings before opening
+  Chat or mail messages.
+- Ed25519/SHA-256 works through the GnuPG component, shared Python adapter and
+  native signing helper. ML-DSA external-μ requirements remain unchanged.
+- Sequoia and GnuPG enforce bounded input/output and deadlines across the helper
+  chain; nested PKCS#11 helpers remain in the supervisor's cleanup group.
+- Failed Level 5 companion authentication wipes tentative plaintext. GnuPG patch
+  application preflights all source anchors and rolls back ordinary write failures.
+
+Validation used disposable software keys and mocked transports: **eight packaged
+PQ Mail Java suites**, **four frontend Rust tests**, **39 frontend Python tests**,
+**31 Sequoia tests**, **24 GnuPG connector tests** and **seven mirrored bridge
+tests** passed. Shared-adapter and native signing/KEM regressions also passed,
+with one optional Python test skipped. Suite counts overlap. The installed Mac
+update passed deep/strict code-signature verification; its provisioned Keychain
+helper was retained unchanged. These checks performed no hardware or live-account
+operations and changed no keys, certificates or touch policies. See the
+[seven-fix report and test commands](docs/REVIEW-FIXES-20261121.md) for scope,
+platform limitations and reproducible checks.
+
 ## Experimental Google Chat
 
 The desktop app can connect to Google Chat, browse conversations, and send or open signed and optionally encrypted OpenPGP bundles. Enable **Experimental Google Chat** in Settings → Mail accounts, select the separate Desktop OAuth client bundled with your build, then use **Google Chat → Sign in or reconnect**. The feature remains off by default. A dedicated development Google Cloud project keeps Chat consent separate from Gmail; it requests `chat.spaces.readonly`, `chat.messages.readonly` and `chat.messages.create`, plus basic account email identification.

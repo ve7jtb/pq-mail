@@ -6,6 +6,9 @@ import java.util.*;
 final class AttachedOpenPgp {
  private int parts, attachments;
  private final Map<String,OpenPgp.PublicIdentity> keys=new LinkedHashMap<>();
+ // Discovery deliberately returns untrusted candidates rather than adding
+ // them to a contact store. The caller must verify the message with a candidate
+ // before offering separate save/trust actions to the user.
  static List<OpenPgp.PublicIdentity> find(Part message)throws Exception{var scan=new AttachedOpenPgp();scan.visit(message,0);return List.copyOf(scan.keys.values());}
  private void visit(Part part,int depth)throws Exception{
   if(depth>12||++parts>100)throw new IOException("OpenPGP attachment scan exceeds MIME limits");

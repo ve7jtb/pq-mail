@@ -62,6 +62,9 @@ public final class ExternalMu {
         protected void engineUpdate(byte[] b, int off, int len) { started = true; digest.update(b, off, len); }
         protected byte[] engineSign() throws SignatureException {
             try {
+                // The ML-DSA public key and context participate in mu. Validate
+                // the returned signature locally against that same mu so a
+                // successful adapter exit cannot substitute a different key.
                 byte[] mu = digest.generateMu();
                 byte[] sig = key.backend().sign(key.publicKey(), mu.clone());
                 if (sig == null || !digest.verifyMuSignature(mu, sig))
@@ -158,6 +161,11 @@ public final class ExternalMu {
     public static Backend executable(String executable) { return new ExecutableBackend(executable); }
     static Backend certification(String executable){return new ExecutableBackend(executable,Map.of("PQMAIL_CERTIFICATION_SLOTS","86,87"));}
     @FunctionalInterface interface PinSource { char[] request()throws Exception; }
+    // One logical operation may call two private components. Keep its PIN only
+    // for that operation, return disposable copies to subprocesses, and require
+    // callers to invoke clearSecrets() in their operation-level finally block.
+    // A process/session cache here would accidentally extend authentication to
+    // later messages; newOperation() is the boundary that prevents that reuse.
     static final class OperationPinCache {
         private char[] value;
         synchronized char[] copy(PinSource source)throws Exception {
@@ -197,6 +205,9 @@ public final class ExternalMu {
     }
     static byte[] invoke(String executable,String algorithm,PublicKey publicKey,byte[] mu,char[] pin,boolean rawOutput,Map<String,String> overrides)throws Exception{
             boolean pinDialog=pin!=null;
+            // The helper protocol uses stdin for the PIN and request bytes;
+            // credentials must never become argv entries or environment values.
+            // Environment overrides select public slot/profile metadata only.
             ProcessBuilder builder=DesktopState.process(executable).redirectError(pinDialog?ProcessBuilder.Redirect.PIPE:ProcessBuilder.Redirect.DISCARD);
             builder.environment().putAll(overrides);
             if(pinDialog)builder.environment().put("HYBRID_MAIL_PIN_STDIN","1");
@@ -205,6 +216,10 @@ public final class ExternalMu {
             AutoCloseable progress=pinDialog?TokenPin.progress(algorithm):()->{};
             ExecutorService pool = Executors.newFixedThreadPool(2);
             try {
+                // Collect both pipes concurrently: the child must not block on
+                // stderr while the parent waits for its cryptographic output.
+                // The byte caps bound retained diagnostics/results, while the
+                // process deadline bounds a stalled card or helper operation.
                 Future<byte[]> errors=pool.submit(()->p.getErrorStream().readNBytes(2048));
                 Future<byte[]> output = pool.submit(() -> {
                     byte[] result = p.getInputStream().readNBytes(16385);

@@ -84,11 +84,17 @@ public final class ExternalKem {
         var key=(CompositePublicKey)pub;
         byte[] ml=null,ec=null;
         byte[] traditionalCt=Arrays.copyOfRange(ciphertext,mlSize,mlSize+ecSize);
+        // Reject malformed/off-curve peers before asking for the PIN. The
+        // authenticated envelope is still checked after key recovery; successful
+        // decapsulation alone does not authenticate the message content.
         PublicKey peer=point(traditionalCt,p384); // validate before any PIN/device operation
         try{
             ml=requireSecret(backend.decapsulate(key.getPublicKeys().get(0),Arrays.copyOf(ciphertext,mlSize)));
             ec=backend.derive(key.getPublicKeys().get(1),peer);
             if(ec==null||ec.length!=(p384?48:32))throw new GeneralSecurityException("Invalid ECDH shared-secret length");
+            // CMS composite KEM ordering and label are profile-specific. Do not
+            // reuse this concatenation for OpenPGP: its combiner has a different
+            // transcript even when both use the same hardware component keys.
             MessageDigest combiner=MessageDigest.getInstance("SHA3-256");
             combiner.update(ml);combiner.update(ec);combiner.update(traditionalCt);
             combiner.update(ECUtil.getUncompressedSubjectPublicKeyBytes(SubjectPublicKeyInfo.getInstance(key.getPublicKeys().get(1).getEncoded()),BouncyCastleProvider.CONFIGURATION));
@@ -115,6 +121,9 @@ public final class ExternalKem {
                         throw new GeneralSecurityException("Unsupported or inconsistent CMS KEM parameters");
                     if(info.getUkm()!=null&&info.getUkm().length>1024)throw new GeneralSecurityException("KEM ukm too large");
                     secret=recover(certificate.getPublicKey(),info.getKemct().getOctets(),operation);
+                    // CMS binds the wrapping algorithm, KEK length and optional
+                    // user keying material into OtherInfo. Only this derived KEK
+                    // unwraps the content key; raw component secrets do not.
                     byte[] otherInfo=new CMSORIforKEMOtherInfo(info.getWrap(),32,info.getUkm()).getEncoded();
                     var spec=new KTSParameterSpec.Builder("AES",256,otherInfo).withKdfAlgorithm(info.getKdf()).build();
                     kek=KdfUtil.makeKeyBytes(spec,secret);

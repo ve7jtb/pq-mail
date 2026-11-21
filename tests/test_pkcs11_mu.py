@@ -11,6 +11,13 @@ ADAPTER=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(ADAPTER)
 PUBLIC=b"p"*1974;MU=bytes(range(64));SIGNATURE=b"s"*3309
 
 class Pkcs11AdapterTest(unittest.TestCase):
+    def test_ed25519_sha256_request(self):
+        import base64
+        public=bytes.fromhex("302a300506032b6570032100")+bytes(32)
+        digest=bytes(range(32))
+        request=b"Ed25519\n"+base64.b64encode(public)+b"\n"+base64.b64encode(digest)+b"\n"
+        self.assertEqual(ADAPTER.read_request(io.BytesIO(request)),("Ed25519",public,digest))
+
     def setUp(self):self.terminal=io.BytesIO();self.commands=[];self.paths=[]
     def fake(self,wrong_key=False,fail_sign=False,bad_length=False,fail_export=False):
         def run(command,**kwargs):

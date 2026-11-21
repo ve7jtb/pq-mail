@@ -42,6 +42,9 @@ final class LegacyOpenPgp {
         default -> false;
     };}
     @FunctionalInterface interface Check{boolean run(PGPSignature s)throws Exception;}
+    // Treat packet issuer IDs as hints, never as proof of authorship. Only
+    // signatures that verify under the supplied primary/subkey reach policy
+    // selection; unrelated third-party certifications cannot change key flags.
     static List<PGPSignature> verified(Iterator<PGPSignature> it,PGPPublicKey issuer,Check check)throws Exception{
         var out=new ArrayList<PGPSignature>();int count=0;
         while(it!=null&&it.hasNext()){require(++count<=512,"Too many certificate signatures");var s=it.next();
@@ -59,6 +62,9 @@ final class LegacyOpenPgp {
         require(verified(primary.getSignaturesOfType(PGPSignature.KEY_REVOCATION),primary,s->s.verifyCertification(primary)).isEmpty(),"Revoked primary key");
         var policies=new ArrayList<PGPSignature>();
         policies.addAll(verified(primary.getSignaturesOfType(PGPSignature.DIRECT_KEY),primary,s->s.verifyCertification(primary)));
+        // An email address becomes a candidate only through a live verified
+        // self-certification. This certifies a key-to-address claim; the contact
+        // trust store still determines whether the user trusts that claim.
         var addresses=new ArrayList<String>();
         var ids=primary.getUserIDs();int count=0;
         while(ids.hasNext()){require(++count<=64,"Too many certificate user IDs");String uid=ids.next();
@@ -82,6 +88,9 @@ final class LegacyOpenPgp {
             try{if(!live(k,bind))continue;}catch(Exception e){continue;}
             boundKeys.put(k.getKeyID(),k);bindings.put(k.getKeyID(),bind);int flags=bind.getHashedSubPackets().getKeyFlags();
             if((flags&12)!=0&&k.isEncryptionKey()&&(selected==null||rank(k)>rank(selected)||rank(k)==rank(selected)&&k.getCreationTime().after(selected.getCreationTime())))selected=k;
+            // Signing subkeys additionally prove possession with an embedded
+            // primary-key-binding signature (back signature). An encryption
+            // binding alone is insufficient to authorize document signatures.
             if((flags&2)!=0){boolean cross=false;var embeddedList=new ArrayList<PGPSignature>();for(var packets:Arrays.asList(bind.getHashedSubPackets(),bind.getUnhashedSubPackets())){if(packets!=null){var es=packets.getEmbeddedSignatures();for(int j=0;j<es.size();j++)embeddedList.add(es.get(j));}}var embedded=embeddedList;
                 for(int i=0;i<embedded.size();i++){var s=embedded.get(i);if(s.getSignatureType()!=PGPSignature.PRIMARYKEY_BINDING)continue;
                     try{policy(s);s.init(verifier(),k);if(s.verifyCertification(primary,k))cross=true;}catch(PGPException e){/* invalid cross-certification */}}
@@ -142,6 +151,9 @@ final class LegacyOpenPgp {
         if(version==6){var issuer=s.getHashedSubPackets().getIssuerFingerprint();require(issuer!=null&&Arrays.equals(issuer.getFingerprint(),k.getFingerprint()),"Wrong signing fingerprint");}
         s.init(verifier(),k);s.update(data);require(s.verify(),"Invalid OpenPGP signature");
     }
+    // Bound every decompression layer and reject extra packet sequences. The
+    // literal bytes are returned only after document-signature verification;
+    // parsing a literal packet must never itself trigger a "verified" display.
     byte[] openSigned(byte[] data)throws Exception{
         var f=objects(data);Object first=f.nextObject();int depth=0;
         while(first instanceof PGPCompressedData c){require(++depth<=3,"Unsupported compressed packet nesting");data=bounded(c.getDataStream());require(f.nextObject()==null,"Trailing compressed packet");f=objects(data);first=f.nextObject();}

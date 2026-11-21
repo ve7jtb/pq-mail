@@ -30,8 +30,9 @@ def read_request(stream):
     try:spki,payload=[base64.b64decode(line.strip(),validate=True) for line in fields]
     except ValueError as error:raise AdapterError("Invalid base64 request") from error
     size,low,high=profiles[algorithm]
-    # Ed25519 signs the OpenPGP hash as a raw message: v6 SHA-384 or v4 SHA-512.
-    valid_size = len(payload) in (48,64) if algorithm==b"Ed25519\n" else len(payload)==size
+    # Ed25519 signs the OpenPGP hash as a raw message, including SHA-256
+    # selected by classical GnuPG callers; ML-DSA still requires external mu.
+    valid_size = len(payload) in (32,48,64) if algorithm==b"Ed25519\n" else len(payload)==size
     if not valid_size or not low<=len(spki)<=high:raise AdapterError("Invalid signing key or input length")
     return algorithm.decode().strip(),spki,payload
 
@@ -104,6 +105,22 @@ def configuration(provider, module, public=False):
             # Cache only inside this short-lived OpenSSL invocation, for an
             # ALWAYS_AUTHENTICATE key's context-specific login after user login.
             "pkcs11-module-cache-pins = cache\nactivate = 1\n" + ("pkcs11-module-login-behavior = never\n" if public else ""))
+
+
+def native_process_options():
+    """Keep descendants in the trusted outer supervisor's isolated POSIX group.
+
+    Sequoia/GnuPG supervisors explicitly set this flag after creating their own
+    process group. Starting another session here would let native helpers escape
+    that group's deadline cleanup. Ordinary app/Terminal calls keep the existing
+    new-session behavior. This flag never changes algorithm, slot or PIN policy.
+    """
+    supervised = os.environ.get("PQMAIL_SUPERVISED_PROCESS_GROUP")
+    if supervised is not None:
+        if supervised != "1" or os.name != "posix":
+            raise AdapterError("Invalid supervised process-group configuration")
+        return {"start_new_session": False}
+    return {} if os.name == "nt" else {"start_new_session": True}
 
 
 def child_environment(config_file, object_id=None):
@@ -179,7 +196,7 @@ def single_process_sign(helper,spki,payload,provider,module,serial,object_id,alg
             # The helper checks the live key before reading the PIN, and uses
             # the provider callback. Never retry/fall back after a failure.
             command=[str(helper),algorithm,"pkcs11:serial="+serial+";id="+object_id+";type=",str(public),str(data),str(signature)]
-            options={} if os.name=="nt" else {"start_new_session":True}
+            options=native_process_options()
             result=run(command,input=bytes(pin)+b"\n",stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,env=env,timeout=100,**options)
             if result.returncode:
                 raw=getattr(result,"stderr",b"") or b""

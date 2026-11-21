@@ -106,6 +106,15 @@ static int verify_signature(EVP_PKEY *key, const char *alg,
     }
     return ok;
 }
+/* Validate the protocol input before any PIN or provider operation. Ed25519
+ * signs the supplied OpenPGP digest as a raw message, so SHA-256/SHA-384/SHA-512
+ * lengths are all valid. ML-DSA retains its fixed 64-byte external-mu input. */
+static int valid_input_length(const char *alg, size_t length) {
+    if(!strcmp(alg,"Ed25519"))return length==32 || length==48 || length==64;
+    if(!strncmp(alg,"ML-DSA-",7))return length==64;
+    if(!strcmp(alg,"ECDSA-P384-SHA384"))return length==48;
+    return length==32;
+}
 int main(int argc,char **argv) {
     timing("start");
     int rc=1,ed=0;const char *stage="arguments";struct secret pin={{0},0,0};
@@ -118,8 +127,8 @@ int main(int argc,char **argv) {
     if(strcmp(alg,"ML-DSA-44") && strcmp(alg,"ML-DSA-65") && strcmp(alg,"ML-DSA-87") && strcmp(alg,"Ed25519") && strcmp(alg,"ECDSA-P256-SHA256") && strcmp(alg,"ECDSA-P384-SHA384") && strcmp(alg,"RSA3072-PSS-SHA256"))goto done;
     snprintf(public_uri,sizeof(public_uri),"%spublic",argv[2]);snprintf(private_uri,sizeof(private_uri),"%sprivate",argv[2]);
     stage="input";n=read_file(argv[3],der,sizeof(der));size_t inlen=read_file(argv[4],input,sizeof(input));if(!n || !inlen)goto done;
-    ed=!strcmp(alg,"Ed25519");size_t required=(!strncmp(alg,"ML-DSA-",7))?64:(!strcmp(alg,"ECDSA-P384-SHA384"))?48:32;
-    if(ed ? (inlen!=48 && inlen!=64) : inlen!=required)goto done;
+    ed=!strcmp(alg,"Ed25519");
+    if(!valid_input_length(alg,inlen))goto done;
     timing("input");
     stage="PIN callback setup";if(!use_pin_callback())goto done;
     stage="providers";def=OSSL_PROVIDER_load(NULL,"default");p11=OSSL_PROVIDER_load(NULL,"pkcs11");if(!def||!p11)goto done;
@@ -127,7 +136,7 @@ int main(int argc,char **argv) {
     const unsigned char *cursor=der;expected=d2i_PUBKEY_ex(NULL,&cursor,n,NULL,"provider=default");if(!expected||cursor!=der+n)goto done;
     const char *type=ed?"ED25519":!strncmp(alg,"ML-DSA-",7)?alg:!strncmp(alg,"ECDSA-",6)?"EC":"RSA";
     if(!EVP_PKEY_is_a(expected,type))goto done;
-    if(!strncmp(alg,"ECDSA-",6) && EVP_PKEY_get_bits(expected)!=(required==48?384:256))goto done;
+    if(!strncmp(alg,"ECDSA-",6) && EVP_PKEY_get_bits(expected)!=(!strcmp(alg,"ECDSA-P384-SHA384")?384:256))goto done;
     if(!strcmp(type,"RSA") && EVP_PKEY_get_bits(expected)!=3072)goto done;
     ui=UI_create_method("PQ Mail private PIN pipe");if(!ui||UI_method_set_reader(ui,pin_reader)!=0)goto done;
     timing("expected-key-decode");

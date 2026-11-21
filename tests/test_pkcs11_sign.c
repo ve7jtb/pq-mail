@@ -64,11 +64,15 @@ static void test_pin_callback(void) {
  puts("PASS PIN callback mode, inherited-mode override, fail-closed readiness and UI delivery; no hardware used.");
 }
 int main(void) {
+ /* Exercise the production request gate as well as software signatures. */
+ assert(valid_input_length("Ed25519",32));assert(valid_input_length("Ed25519",48));assert(valid_input_length("Ed25519",64));
+ assert(!valid_input_length("Ed25519",31));assert(!valid_input_length("Ed25519",65));
+ assert(!valid_input_length("ML-DSA-65",32));assert(valid_input_length("ML-DSA-65",64));
  test_pin_callback();
  assert(OSSL_PROVIDER_load(NULL,"default"));
  test("ML-DSA-44","ML-DSA-44",NULL,64);test("ML-DSA-65","ML-DSA-65",NULL,64);test("ML-DSA-87","ML-DSA-87",NULL,64);
- test("Ed25519","ED25519",NULL,48);test("Ed25519","ED25519",NULL,64);
+ test("Ed25519","ED25519",NULL,32);test("Ed25519","ED25519",NULL,48);test("Ed25519","ED25519",NULL,64);
  test("ECDSA-P256-SHA256","EC","prime256v1",32);test("ECDSA-P384-SHA384","EC","secp384r1",48);
  test("RSA3072-PSS-SHA256","RSA",NULL,32);
- puts("PASS 40 verification assertions; no hardware used.");return 0;
+ puts("PASS 45 verification assertions and 7 request-length checks; no hardware used.");return 0;
 }
